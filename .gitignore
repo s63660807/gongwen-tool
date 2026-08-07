@@ -1,0 +1,22 @@
+# 构建产物
+build/
+dist/
+*.spec
+
+# 生成的模板（由 create_reference.py 生成）
+reference.docx
+
+# 打包的 exe
+*.exe
+
+# 临时文件
+__pycache__/
+*.pyc
+
+# 材料数据（不纳入版本控制）
+*.doc
+*.docx
+*.md
+!README.md
+!公文MD提示词.txt
+!使用说明.txt
