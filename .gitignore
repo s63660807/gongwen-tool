@@ -20,3 +20,8 @@ __pycache__/
 !README.md
 !公文MD提示词.txt
 !使用说明.txt
+
+# 但技能目录内的文件全部纳入（SKILL.md、reference.docx 等）
+!skills/**
+!**/SKILL.md
+!
