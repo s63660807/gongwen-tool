@@ -75,6 +75,7 @@ description: 公文格式转换工作流——将 Markdown 一键转换为符合
 8. **必须定义 FirstParagraph / BodyText 样式**：Pandoc 转换时正文段落实际引用这两个样式（非 Normal），模板若不定义则 Word 回退显示异常（曾导致党建材料格式错乱）。create_reference.py 已将其定义为与 Normal 一致。
 9. **必须清除 rFonts 的 theme 引用属性**：Pandoc 模板会给各样式带 `asciiTheme/eastAsiaTheme/hAnsiTheme/cstheme`，其优先级高于显式字体名，会把黑体/楷体/小标宋覆盖成主题字体（宋体）。strip_spacing.py 的 `strip_font_theme_attrs` 已自动清除（document.xml + styles.xml 两层），无需手动处理。
 10. **段落格式不得带「段中不分页」/「与下段同页」**：python-docx 内建模板的 Heading1-9 自带 `w:keepLines`（段中不分页）和 `w:keepNext`（与下段同页），会导致 Word 段落出现分页粘连，与公文排版习惯不符。已在**三层**处置：create_reference.py 生成模板后清除（源头）、convert.py 内嵌副本生成模板后清除、strip_spacing.py 兜底清除（document.xml + styles.xml）。转换后段落格式保证不含这两个属性。
+11. **标题内不得夹带正文（正文不跟标题格式）**：若 md 把二级/三级标题和正文写在同一自然段（如 `## （一）强化组织领导。各级党组要切实履行主体责任……`），Pandoc 会整段渲染为 Heading 样式，导致本应正文的内容也跟着标题格式（楷体/黑体）。修复：`split_heading_with_inline_body`（strip_spacing.py）/ `_split_heading_inline_body`（convert.py 内嵌）会把标题到第一个「。」为止作为标题、句号后的内容拆成一个 FirstParagraph 正文段落。幂等：标题无句号或句号后无正文时不拆分，正常短标题不受影响。
 
 ## 与 doc-reader 技能配合
 

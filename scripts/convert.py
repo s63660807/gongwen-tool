@@ -224,15 +224,92 @@ def generate_reference(output_path):
 
 
 def strip_spacing_docx(docx_path):
-    """清除 docx 中所有段前/段后间距，Title 后插入空行，修复中文引号方向"""
+    """清除 docx 中所有段前/段后间距，Title 后插入空行，修复中文引号方向，拆分标题内夹带正文"""
     import zipfile
     import tempfile
     from lxml import etree
+    import re as _re
 
     NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     DOUBLE_QUOTES = {'"': True, '\u201c': True, '\u201d': True}
     SINGLE_QUOTES = {"'": True, '\u2018': True, '\u2019': True}
     tmp = tempfile.mkdtemp()
+
+    # ── 标题内夹带正文拆分（修复正文被套用标题格式） ──
+    _CN_NUM = '一二三四五六七八九'
+    _RE_NUM = _re.compile(r'^\d+[\.、]')
+    _RE_H1 = _re.compile(rf'^[{_CN_NUM}十]+、')
+    _RE_H2 = _re.compile(rf'^（[{_CN_NUM}十]+）')
+
+    def _strip_prefix(full, style_val):
+        """去掉标题序号前缀（「一、」「（一）」「1. 」），返回标题正文；非标题开头原样返回。"""
+        if style_val in ('Heading1', 'Heading2', 'Heading3', 'Compact'):
+            for m in (_RE_NUM.match(full), _RE_H1.match(full), _RE_H2.match(full)):
+                if m:
+                    return full[len(m.group(0)):]
+        return full
+
+    def _set_text(para, new_text):
+        """把段落文本替换为单一 new_text，保留首 run 格式。"""
+        runs = list(para.iter(f'{{{NS}}}r'))
+        if runs:
+            r0 = runs[0]
+            for tn in list(r0.findall(f'{{{NS}}}t')):
+                r0.remove(tn)
+            t = etree.SubElement(r0, f'{{{NS}}}t')
+            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            t.text = new_text
+            for r in runs[1:]:
+                para.remove(r)
+        else:
+            r = etree.Element(f'{{{NS}}}r')
+            t = etree.SubElement(r, f'{{{NS}}}t')
+            t.text = new_text
+            pPr = para.find(f'{{{NS}}}pPr')
+            if pPr is not None:
+                pPr.addnext(r)
+            else:
+                para.append(r)
+
+    def _split_heading_inline_body(tree):
+        """Heading1/2/3（及 Compact）段落若在序号后第一个「。」后仍有正文，则拆分标题与正文。"""
+        body = tree.find(f'{{{NS}}}body')
+        if body is None:
+            return
+        for para in list(body.iter(f'{{{NS}}}p')):
+            pPr = para.find(f'{{{NS}}}pPr')
+            if pPr is None:
+                continue
+            pStyle = pPr.find(f'{{{NS}}}pStyle')
+            if pStyle is None:
+                continue
+            style_val = pStyle.get(f'{{{NS}}}val')
+            if style_val not in ('Heading1', 'Heading2', 'Heading3', 'Compact'):
+                continue
+            texts = [t for t in para.iter(f'{{{NS}}}t') if t.text]
+            full = ''.join(t.text for t in texts)
+            title_body = _strip_prefix(full, style_val)
+            if title_body is full and style_val == 'Compact':
+                continue  # Compact 非数字列表则跳过
+            dot_idx = title_body.find('。')
+            if dot_idx < 0:
+                continue
+            after = title_body[dot_idx + 1:].strip()
+            if not after:
+                continue
+            serial_len = len(full) - len(title_body)
+            title_txt = full[: serial_len + dot_idx + 1]
+            body_txt = full[serial_len + dot_idx + 1:]
+            new_p = etree.Element(f'{{{NS}}}p')
+            new_pPr = etree.SubElement(new_p, f'{{{NS}}}pPr')
+            new_st = etree.SubElement(new_pPr, f'{{{NS}}}pStyle')
+            new_st.set(f'{{{NS}}}val', 'FirstParagraph')
+            new_r = etree.SubElement(new_p, f'{{{NS}}}r')
+            new_t = etree.SubElement(new_r, f'{{{NS}}}t')
+            new_t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            new_t.text = body_txt
+            _set_text(para, title_txt)
+            para.addnext(new_p)
 
     with zipfile.ZipFile(docx_path, 'r') as z:
         z.extractall(tmp)
@@ -252,10 +329,12 @@ def strip_spacing_docx(docx_path):
                     del rfonts.attrib[f'{{{NS}}}{attr}']
         tree.write(xml_path, xml_declaration=True, encoding='UTF-8')
 
-    # 修复引号方向 + Title 前后插入空行（仅 document.xml 正文）
+    # 修复引号方向 + Title 前后插入空行 + 拆分标题内夹带正文（仅 document.xml 正文）
     doc_xml = os.path.join(tmp, 'word/document.xml')
     if os.path.exists(doc_xml):
         tree = etree.parse(doc_xml)
+        # 拆分标题内夹带正文（修复正文被套用标题格式）
+        _split_heading_inline_body(tree)
         # Title 前后各插入一个空段落（回车空行），已存在则跳过
         body = tree.find(f'{{{NS}}}body')
         if body is not None:

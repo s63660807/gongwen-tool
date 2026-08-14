@@ -62,6 +62,131 @@ def strip_keep_flags_in_tree(tree, xml_path=''):
     return count
 
 
+# 中文数字，用于识别「一、二、…」「（一）（二）…」「（十）（廿）…」等公文标题序号
+_CN_NUM = '一二三四五六七八九'
+
+
+def _strip_serial_prefix(full, style_val):
+    """去掉标题段落开头的公文序号前缀（「一、」「（一）」「1. 」等），返回标题正文字段。
+
+    若开头不是对应层级的序号，则原样返回（调用方据此视为普通段落）。
+    """
+    if style_val in ('Heading1', 'Heading2', 'Heading3', 'Compact'):
+        # Heading3 / Compact 常用数字点「1. 」或数字顿号「1、」
+        m = HEADING_RE_NUM.match(full)
+        if m:
+            return full[len(m.group(0)):]
+        # Heading1：一、二、……
+        m = HEADING_RE_H1.match(full)
+        if m:
+            return full[len(m.group(0)):]
+        # Heading2 / 括号序列：（一）（二）……（十）（十一）……
+        m = HEADING_RE_H2.match(full)
+        if m:
+            return full[len(m.group(0)):]
+    return full
+
+
+# 预编译：数字点/顿号 → 如 "1." 或 "1、"
+import re as _re
+HEADING_RE_NUM = _re.compile(r'^\d+[\.、]')
+HEADING_RE_H1 = _re.compile(rf'^[{_CN_NUM}十]+、')
+HEADING_RE_H2 = _re.compile(rf'^（[{_CN_NUM}十]+）')
+
+
+def split_heading_with_inline_body(tree):
+    """修复「标题与正文写在同一自然段」导致的正文被套用标题格式问题。
+
+    场景：md 中把二级/三级标题和正文写在同一自然段（如
+    `## （一）强化组织领导。各级党组要切实履行主体责任……`），Pandoc
+    整段渲染为 Heading 样式，导致正文也跟着标题格式（楷体/黑体）。
+
+    规则：对 Heading1/2/3（及 Compact 列表标题）段落，去掉序号前缀后，
+    若找到第一个「。」且其后仍有非空正文，则把标题部分（到句号为止）
+    保留为标题，句号后的内容拆成一个新的正文段落（FirstParagraph 样式）。
+
+    幂等：标题本身无句号或句号后无正文时不拆分；重复运行不影响已拆分结果。
+    """
+    body = tree.find(f'{{{NS}}}body')
+    if body is None:
+        return 0
+    split_count = 0
+    for para in list(body.iter(f'{{{NS}}}p')):
+        pPr = para.find(f'{{{NS}}}pPr')
+        if pPr is None:
+            continue
+        pStyle = pPr.find(f'{{{NS}}}pStyle')
+        if pStyle is None:
+            continue
+        style_val = pStyle.get(f'{{{NS}}}val')
+        if style_val not in ('Heading1', 'Heading2', 'Heading3', 'Compact'):
+            continue
+        # 收集段落全部文本
+        texts = [t for t in para.iter(f'{{{NS}}}t') if t.text]
+        full = ''.join(t.text for t in texts)
+        # 去掉序号前缀，得到标题正文字段
+        title_body = _strip_serial_prefix(full, style_val)
+        if title_body is full:
+            # 无序号前缀，但 Heading1/2/3 一般都有；视为普通标题跳过
+            # 例外：Compact（列表）严格限定数字开头，无则跳过
+            if style_val == 'Compact':
+                continue
+        # 找第一个句号
+        dot_idx = title_body.find('。')
+        if dot_idx < 0:
+            continue  # 标题本身无句号，正常短标题，跳过
+        after = title_body[dot_idx + 1:].strip()
+        if not after:
+            continue  # 句号后无正文，正常标题，跳过
+        # ===== 需要拆分 =====
+        # 标题部分 = 序号 + 标题正文到句号；正文部分 = 句号后内容
+        serial_len = len(full) - len(title_body)
+        title_txt = full[: serial_len + dot_idx + 1]       # 含句号
+        body_txt = full[serial_len + dot_idx + 1:]          # 句号后内容
+        # 新建正文段落（FirstParagraph 样式）
+        new_p = etree.Element(f'{{{NS}}}p')
+        new_pPr = etree.Element(f'{{{NS}}}pPr')
+        new_style = etree.SubElement(new_pPr, f'{{{NS}}}pStyle')
+        new_style.set(f'{{{NS}}}val', 'FirstParagraph')
+        new_p.append(new_pPr)
+        new_r = etree.SubElement(new_p, f'{{{NS}}}r')
+        new_t = etree.SubElement(new_r, f'{{{NS}}}t')
+        new_t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        new_t.text = body_txt
+        # 原段落文本改为标题部分
+        _set_para_text(para, title_txt)
+        # 新正文段插入原段之后
+        para.addnext(new_p)
+        split_count += 1
+    return split_count
+
+
+def _set_para_text(para, new_text):
+    """把段落内的文本替换为单一文本 new_text，保留第一个 run 的格式。"""
+    runs = list(para.iter(f'{{{NS}}}r'))
+    if runs:
+        r0 = runs[0]
+        # 移除 r0 内所有 t，重设第一个
+        for tn in list(r0.findall(f'{{{NS}}}t')):
+            r0.remove(tn)
+        t = etree.SubElement(r0, f'{{{NS}}}t')
+        t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        t.text = new_text
+        # 移除其他 run
+        for r in runs[1:]:
+            para.remove(r)
+    else:
+        # 无 run，新建一个并插到 pPr 后
+        r = etree.Element(f'{{{NS}}}r')
+        t = etree.SubElement(r, f'{{{NS}}}t')
+        t.text = new_text
+        pPr = para.find(f'{{{NS}}}pPr')
+        if pPr is not None:
+            pPr.addnext(r)
+        else:
+            para.append(r)
+
+
 def insert_blank_around_title(tree):
     """在公文标题（Title 样式）段落前后各插入一个真正的空段落（回车空行）。
 
@@ -141,11 +266,12 @@ def strip_spacing(input_path, output_path=None):
 
     nsmap = {'w': NS}
 
-    # 1. 处理 document.xml — 段落级 spacing + 标题前后空行 + 引号修复 + 字体theme清理 + 分页粘连清理
+    # 1. 处理 document.xml — 段落级 spacing + 标题前后空行 + 引号修复 + 字体theme清理 + 分页粘连清理 + 标题内夹带正文拆分
     doc_path = os.path.join(tmp, 'word/document.xml')
     if os.path.exists(doc_path):
         tree = etree.parse(doc_path)
         strip_spacing_in_tree(tree, xml_path='word/document.xml')
+        split_heading_with_inline_body(tree)
         insert_blank_around_title(tree)
         fix_quotes_in_tree(tree)
         strip_font_theme_attrs(tree)
@@ -170,7 +296,7 @@ def strip_spacing(input_path, output_path=None):
                 zout.write(full, arcname)
 
     shutil.rmtree(tmp)
-    print(f"[OK] 段间距已清零、标题前后空行已插入、引号与字体已修复、分页粘连(段中不分页/与下段同页)已清除: {output_path}")
+    print(f"[OK] 段间距已清零、标题前后空行已插入、引号与字体已修复、分页粘连(段中不分页/与下段同页)已清除、标题内夹带正文已拆分: {output_path}")
     return output_path
 
 
