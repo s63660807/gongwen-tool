@@ -117,6 +117,22 @@ def set_first_line_indent(style, chars):
     ind.set(qn("w:firstLineChars"), str(int(chars * 100)))  # 100 = 1 字符
 
 
+def remove_keep_flags(style):
+    """移除样式的「段中不分页」(w:keepLines) 与「与下段同页」(w:keepNext)。
+
+    这两种分页控制来自 python-docx 内建模板自带在 Heading 系列样式上，
+    会导致 Word 中段落「段中不分页」「与下段同页」被勾选，与公文排版习惯不符
+    （公文段落间不应做这种分页粘连）。在生成模板后统一清除。
+    """
+    pPr = style.element.find(qn("w:pPr"))
+    if pPr is None:
+        return
+    for tag in ("w:keepLines", "w:keepNext", "w:keep_with_next"):
+        elem = pPr.find(qn(tag))
+        if elem is not None:
+            pPr.remove(elem)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 创建文档
 # ═══════════════════════════════════════════════════════════════════
@@ -372,6 +388,25 @@ doc.add_paragraph("2026年X月X日", style="Date")
 # ═══════════════════════════════════════════════════════════════════
 # 保存
 # ═══════════════════════════════════════════════════════════════════
+
+# ── 清除全部样式的「段中不分页」/「与下段同页」──
+# python-docx 内建模板的 Heading1-9 自带 w:keepLines(段中不分页) 和
+# w:keepNext(与下段同页)，公文段落不应做这种分页粘连，统一清除。
+_removed = {"w:keepLines": 0, "w:keepNext": 0, "w:keep_with_next": 0}
+for _style in doc.styles:
+    if _style.type != 1:  # 只处理段落样式
+        continue
+    _pPr = _style.element.find(qn("w:pPr"))
+    if _pPr is None:
+        continue
+    for _tag in ("w:keepLines", "w:keepNext", "w:keep_with_next"):
+        _el = _pPr.find(qn(_tag))
+        if _el is not None:
+            _pPr.remove(_el)
+            _removed[_tag] += 1
+if any(_removed.values()):
+    print(f"[INFO] 已清除样式的分页粘连属性: {_removed}")
+
 saved_path = safe_save(doc, OUTPUT_PATH)
 print(f"[OK] 参考文档: {saved_path}")
 print(f"     大小: {os.path.getsize(saved_path)} bytes")

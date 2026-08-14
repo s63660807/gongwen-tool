@@ -207,6 +207,19 @@ def generate_reference(output_path):
     set_alignment(h4, WD_ALIGN_PARAGRAPH.JUSTIFY)
     set_first_line_indent(h4, 2)
 
+    # 清除全部样式的「段中不分页」(w:keepLines) 与「与下段同页」(w:keepNext)
+    # python-docx 内建模板的 Heading1-9 自带这两个分页属性，公文段落不应做分页粘连。
+    for _s in doc.styles:
+        if getattr(_s, "type", 1) != 1:  # 只处理段落样式
+            continue
+        _pp = _s.element.find(qn("w:pPr"))
+        if _pp is None:
+            continue
+        for _tag in ("w:keepLines", "w:keepNext", "w:keep_with_next"):
+            _el = _pp.find(qn(_tag))
+            if _el is not None:
+                _pp.remove(_el)
+
     return safe_save_local(doc, output_path)
 
 

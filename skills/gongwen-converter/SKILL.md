@@ -74,6 +74,7 @@ description: 公文格式转换工作流——将 Markdown 一键转换为符合
 7. **标题前后各空一行（回车空行）**：公文标题（Title）段落前后各插入一个真正的空段落（回车产生的空行），Heading 不加；不是段后间距。strip_spacing.py 的 `insert_blank_around_title` 实现，且幂等（已有空行则跳过）。
 8. **必须定义 FirstParagraph / BodyText 样式**：Pandoc 转换时正文段落实际引用这两个样式（非 Normal），模板若不定义则 Word 回退显示异常（曾导致党建材料格式错乱）。create_reference.py 已将其定义为与 Normal 一致。
 9. **必须清除 rFonts 的 theme 引用属性**：Pandoc 模板会给各样式带 `asciiTheme/eastAsiaTheme/hAnsiTheme/cstheme`，其优先级高于显式字体名，会把黑体/楷体/小标宋覆盖成主题字体（宋体）。strip_spacing.py 的 `strip_font_theme_attrs` 已自动清除（document.xml + styles.xml 两层），无需手动处理。
+10. **段落格式不得带「段中不分页」/「与下段同页」**：python-docx 内建模板的 Heading1-9 自带 `w:keepLines`（段中不分页）和 `w:keepNext`（与下段同页），会导致 Word 段落出现分页粘连，与公文排版习惯不符。已在**三层**处置：create_reference.py 生成模板后清除（源头）、convert.py 内嵌副本生成模板后清除、strip_spacing.py 兜底清除（document.xml + styles.xml）。转换后段落格式保证不含这两个属性。
 
 ## 与 doc-reader 技能配合
 

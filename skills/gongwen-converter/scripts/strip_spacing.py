@@ -46,6 +46,22 @@ def strip_font_theme_attrs(tree):
     return count
 
 
+def strip_keep_flags_in_tree(tree, xml_path=''):
+    """移除 XML 树中所有「段中不分页」(w:keepLines) 与「与下段同页」(w:keepNext)。
+
+    兜底清除：即使 reference.docx 模板或 Pandoc 转换遗漏了这两个属性，
+    这里也能保证最终 docx 段落不带「段中不分页」「与下段同页」分页粘连。
+    """
+    count = 0
+    for pPr in tree.iter(f'{{{NS}}}pPr'):
+        for tag in ('keepLines', 'keepNext', 'keep_with_next'):
+            el = pPr.find(f'{{{NS}}}{tag}')
+            if el is not None:
+                pPr.remove(el)
+                count += 1
+    return count
+
+
 def insert_blank_around_title(tree):
     """在公文标题（Title 样式）段落前后各插入一个真正的空段落（回车空行）。
 
@@ -125,7 +141,7 @@ def strip_spacing(input_path, output_path=None):
 
     nsmap = {'w': NS}
 
-    # 1. 处理 document.xml — 段落级 spacing + 标题前后空行 + 引号修复 + 字体theme清理
+    # 1. 处理 document.xml — 段落级 spacing + 标题前后空行 + 引号修复 + 字体theme清理 + 分页粘连清理
     doc_path = os.path.join(tmp, 'word/document.xml')
     if os.path.exists(doc_path):
         tree = etree.parse(doc_path)
@@ -133,14 +149,16 @@ def strip_spacing(input_path, output_path=None):
         insert_blank_around_title(tree)
         fix_quotes_in_tree(tree)
         strip_font_theme_attrs(tree)
+        strip_keep_flags_in_tree(tree, xml_path='word/document.xml')
         tree.write(doc_path, xml_declaration=True, encoding='UTF-8')
 
-    # 2. 处理 styles.xml — docDefaults + 所有样式 + 字体theme清理
+    # 2. 处理 styles.xml — docDefaults + 所有样式 + 字体theme清理 + 分页粘连清理
     styles_path = os.path.join(tmp, 'word/styles.xml')
     if os.path.exists(styles_path):
         tree = etree.parse(styles_path)
         strip_spacing_in_tree(tree, xml_path='word/styles.xml')
         strip_font_theme_attrs(tree)
+        strip_keep_flags_in_tree(tree, xml_path='word/styles.xml')
         tree.write(styles_path, xml_declaration=True, encoding='UTF-8')
 
     # 重新打包
@@ -152,7 +170,7 @@ def strip_spacing(input_path, output_path=None):
                 zout.write(full, arcname)
 
     shutil.rmtree(tmp)
-    print(f"[OK] 段间距已清零、标题前后空行已插入、引号与字体已修复: {output_path}")
+    print(f"[OK] 段间距已清零、标题前后空行已插入、引号与字体已修复、分页粘连(段中不分页/与下段同页)已清除: {output_path}")
     return output_path
 
 
