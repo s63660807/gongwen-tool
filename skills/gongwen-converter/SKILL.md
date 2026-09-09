@@ -73,9 +73,10 @@ description: 公文格式转换工作流——将 Markdown 一键转换为符合
 6. **字体依赖**：方正小标宋简体、仿宋_GB2312、楷体_GB2312 需系统已安装，否则 Word 会回退字体。
 7. **标题前后各空一行（回车空行）**：公文标题（Title）段落前后各插入一个真正的空段落（回车产生的空行），Heading 不加；不是段后间距。strip_spacing.py 的 `insert_blank_around_title` 实现，且幂等（已有空行则跳过）。
 8. **必须定义 FirstParagraph / BodyText 样式**：Pandoc 转换时正文段落实际引用这两个样式（非 Normal），模板若不定义则 Word 回退显示异常（曾导致党建材料格式错乱）。create_reference.py 已将其定义为与 Normal 一致。
-9. **必须清除 rFonts 的 theme 引用属性**：Pandoc 模板会给各样式带 `asciiTheme/eastAsiaTheme/hAnsiTheme/cstheme`，其优先级高于显式字体名，会把黑体/楷体/小标宋覆盖成主题字体（宋体）。strip_spacing.py 的 `strip_font_theme_attrs` 已自动清除（document.xml + styles.xml 两层），无需手动处理。
-10. **段落格式不得带「段中不分页」/「与下段同页」**：python-docx 内建模板的 Heading1-9 自带 `w:keepLines`（段中不分页）和 `w:keepNext`（与下段同页），会导致 Word 段落出现分页粘连，与公文排版习惯不符。已在**三层**处置：create_reference.py 生成模板后清除（源头）、convert.py 内嵌副本生成模板后清除、strip_spacing.py 兜底清除（document.xml + styles.xml）。转换后段落格式保证不含这两个属性。
+9. **必须清除 rFonts 的 theme 引用属性**：Pandoc 模板会给各样式带 `asciiTheme/eastAsiaTheme/hAnsiTheme/cstheme`，其优先级高于显式字体名，会把黑体/楷体/小标宋覆盖成主题字体（宋体）。convert.py / strip_spacing.py 均已自动清除（document.xml + styles.xml 两层，`strip_font_theme_attrs`），无需手动处理。
+10. **排版紧凑三开关（分页粘连处置，压缩篇幅关键）**：python-docx 内建模板的 Heading1-9 自带 `w:keepLines`（段中不分页）和 `w:keepNext`（与下段同页），Word 默认还开孤行控制（`w:widowControl`），会把段落尾部最后几行整体挤到下一页、页尾留白严重。已在**多层**处置：create_reference.py 生成模板时删除样式的 keep 属性（`remove_keep_flags`，源头）、convert.py 内嵌副本生成模板后同样清除、后处理兜底用**置 0 法**——`disable_keep_together`（convert.py 与 strip_spacing.py 均有）按 CT_PPr schema 顺序把 `keepNext=0`/`keepLines=0`/`widowControl=0` 显式写入 document.xml 与 styles.xml 两层的每个段落 pPr（`PPR_CHILD_ORDER` 保证插入顺序合法，避免 Word 校验报错）。关闭后每页可多排 2~4 行，要把长文压到指定页数（如两页半）时此项必须开启。注意：Word 打开文档统计页数（ComputeStatistics）与打印分页一致，验证篇幅以 Word/PDF 实测为准，别只按字数估算。
 11. **标题内不得夹带正文（正文不跟标题格式）**：若 md 把二级/三级标题和正文写在同一自然段（如 `## （一）强化组织领导。各级党组要切实履行主体责任……`），Pandoc 会整段渲染为 Heading 样式，导致本应正文的内容也跟着标题格式（楷体/黑体）。修复：`split_heading_with_inline_body`（strip_spacing.py）/ `_split_heading_inline_body`（convert.py 内嵌）会把标题到第一个「。」为止作为标题、句号后的内容拆成一个 FirstParagraph 正文段落。幂等：标题无句号或句号后无正文时不拆分，正常短标题不受影响。
+12. **偶发 UnicodeDecodeError**：convert.py 偶尔报 `Pandoc 转换失败: None` + `UnicodeDecodeError: 'utf-8' codec can't decode...`（多为 pandoc stderr 输出非 UTF-8 字节所致）。convert.py 已对 subprocess 加 `encoding="utf-8", errors="replace"` 容错，如仍复现，重跑一次即可成功，无需改文件。
 
 ## 与 doc-reader 技能配合
 

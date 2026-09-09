@@ -16,6 +16,7 @@ import sys
 import os
 import subprocess
 import shutil
+from lxml import etree
 
 
 def exe_dir():
@@ -223,8 +224,48 @@ def generate_reference(output_path):
     return safe_save_local(doc, output_path)
 
 
+# CT_PPr 子元素 schema 顺序（按序插入 pPr 属性，避免 Word 校验报错）
+PPR_CHILD_ORDER = [
+    'pStyle', 'keepNext', 'keepLines', 'pageBreakBefore', 'framePr',
+    'widowControl', 'numPr', 'suppressLineNumbers', 'pBdr', 'shd', 'tabs',
+    'suppressAutoHyphens', 'kinsoku', 'wordWrap', 'overflowPunct', 'topLinePunct',
+    'autoSpaceDE', 'autoSpaceDN', 'bidi', 'adjustRightInd', 'snapToGrid',
+    'spacing', 'ind', 'contextualSpacing', 'mirrorIndents', 'suppressOverlap',
+    'jc', 'textDirection', 'textAlignment', 'textboxTightWrap', 'outlineLvl',
+    'divId', 'cnfStyle', 'rPr', 'sectPr', 'pPrChange',
+]
+
+
+def _insert_ppr_flag(pPr, tag, ns):
+    """在 w:pPr 中按 schema 顺序设置/创建元素并置 w:val='0'（幂等）"""
+    el = pPr.find(f'{{{ns}}}{tag}')
+    if el is None:
+        el = etree.Element(f'{{{ns}}}{tag}')
+        order = PPR_CHILD_ORDER.index(tag)
+        pos = 0
+        for child in pPr:
+            cname = etree.QName(child).localname
+            if cname in PPR_CHILD_ORDER and PPR_CHILD_ORDER.index(cname) > order:
+                break
+            pos += 1
+        pPr.insert(pos, el)
+    el.set(f'{{{ns}}}val', '0')
+
+
+def disable_keep_together(tree, ns):
+    """关闭所有段落的孤行控制(widowControl)、段中不分页(keepLines)、与下段同页(keepNext)。
+
+    Word 默认的孤行控制/段中不分页/与下段同页会把段落尾部整段挤到下一页，
+    造成页面大量空白；公文压缩篇幅时必须全部关闭，让排版紧凑。
+    """
+    for pPr in tree.iter(f'{{{ns}}}pPr'):
+        for tag in ('keepNext', 'keepLines', 'widowControl'):
+            _insert_ppr_flag(pPr, tag, ns)
+
+
 def strip_spacing_docx(docx_path):
-    """清除 docx 中所有段前/段后间距，Title 后插入空行，修复中文引号方向，拆分标题内夹带正文"""
+    """清除 docx 中所有段前/段后间距，Title 后插入空行，修复中文引号方向，
+    拆分标题内夹带正文，关闭孤行/段中/同页控制（置 0 法，压缩篇幅）。"""
     import zipfile
     import tempfile
     from lxml import etree
@@ -327,6 +368,8 @@ def strip_spacing_docx(docx_path):
             for attr in ['asciiTheme', 'eastAsiaTheme', 'hAnsiTheme', 'cstheme']:
                 if rfonts.get(f'{{{NS}}}{attr}') is not None:
                     del rfonts.attrib[f'{{{NS}}}{attr}']
+        # 关闭孤行控制/段中不分页/与下段同页，避免段尾跳页浪费版面
+        disable_keep_together(tree, NS)
         tree.write(xml_path, xml_declaration=True, encoding='UTF-8')
 
     # 修复引号方向 + Title 前后插入空行 + 拆分标题内夹带正文（仅 document.xml 正文）
@@ -432,7 +475,7 @@ def main():
     print(f"[转换] {md_path} → {docx_path}")
     result = subprocess.run(
         [pandoc, "-f", "markdown-smart", md_path, "-o", docx_path, "--reference-doc=" + ref_path],
-        capture_output=True, text=True
+        capture_output=True, text=True, encoding="utf-8", errors="replace"
     )
     if result.returncode != 0:
         print(f"[错误] Pandoc 转换失败: {result.stderr}")

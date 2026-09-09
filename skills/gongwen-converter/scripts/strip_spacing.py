@@ -3,12 +3,16 @@
 后处理 Pandoc 生成的 docx：
 1. 清除段前/段后间距（保留标题样式的段前段后空行；清除 document.xml 段落层 + styles.xml 的 docDefaults 和其他样式层）
 2. 修复中文引号：将 ASCII 直引号/全右弯引号按成对规则替换为规范的左引号“和右引号”
+3. 关闭所有段落的孤行控制(widowControl)、段中不分页(keepLines)、与下段同页(keepNext)，避免段尾跳页浪费版面
+4. 拆分「标题与正文写在同一自然段」的段落（标题内夹带正文），避免正文被套用标题格式
+5. 移除 rFonts 的 theme 引用属性（asciiTheme/eastAsiaTheme/hAnsiTheme/cstheme），避免主题字体覆盖公文要求字体
 """
 import sys
 import zipfile
 import os
 import tempfile
 import shutil
+import re as _re
 from lxml import etree
 
 NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
@@ -16,6 +20,17 @@ NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 # 引号字符映射
 DOUBLE_QUOTES = {'"': True, '\u201c': True, '\u201d': True}   # " “ ”
 SINGLE_QUOTES = {"'": True, '\u2018': True, '\u2019': True}   # ' ‘ ’
+
+# CT_PPr 子元素 schema 顺序（按序插入 pPr 属性，避免 Word 校验报错）
+PPR_CHILD_ORDER = [
+    'pStyle', 'keepNext', 'keepLines', 'pageBreakBefore', 'framePr',
+    'widowControl', 'numPr', 'suppressLineNumbers', 'pBdr', 'shd', 'tabs',
+    'suppressAutoHyphens', 'kinsoku', 'wordWrap', 'overflowPunct', 'topLinePunct',
+    'autoSpaceDE', 'autoSpaceDN', 'bidi', 'adjustRightInd', 'snapToGrid',
+    'spacing', 'ind', 'contextualSpacing', 'mirrorIndents', 'suppressOverlap',
+    'jc', 'textDirection', 'textAlignment', 'textboxTightWrap', 'outlineLvl',
+    'divId', 'cnfStyle', 'rPr', 'sectPr', 'pPrChange',
+]
 
 
 def strip_spacing_in_tree(tree, xml_path=''):
@@ -46,24 +61,13 @@ def strip_font_theme_attrs(tree):
     return count
 
 
-def strip_keep_flags_in_tree(tree, xml_path=''):
-    """移除 XML 树中所有「段中不分页」(w:keepLines) 与「与下段同页」(w:keepNext)。
-
-    兜底清除：即使 reference.docx 模板或 Pandoc 转换遗漏了这两个属性，
-    这里也能保证最终 docx 段落不带「段中不分页」「与下段同页」分页粘连。
-    """
-    count = 0
-    for pPr in tree.iter(f'{{{NS}}}pPr'):
-        for tag in ('keepLines', 'keepNext', 'keep_with_next'):
-            el = pPr.find(f'{{{NS}}}{tag}')
-            if el is not None:
-                pPr.remove(el)
-                count += 1
-    return count
-
-
 # 中文数字，用于识别「一、二、…」「（一）（二）…」「（十）（廿）…」等公文标题序号
 _CN_NUM = '一二三四五六七八九'
+
+# 预编译：数字点/顿号 → 如 "1." 或 "1、"
+HEADING_RE_NUM = _re.compile(r'^\d+[\.、]')
+HEADING_RE_H1 = _re.compile(rf'^[{_CN_NUM}十]+、')
+HEADING_RE_H2 = _re.compile(rf'^（[{_CN_NUM}十]+）')
 
 
 def _strip_serial_prefix(full, style_val):
@@ -85,13 +89,6 @@ def _strip_serial_prefix(full, style_val):
         if m:
             return full[len(m.group(0)):]
     return full
-
-
-# 预编译：数字点/顿号 → 如 "1." 或 "1、"
-import re as _re
-HEADING_RE_NUM = _re.compile(r'^\d+[\.、]')
-HEADING_RE_H1 = _re.compile(rf'^[{_CN_NUM}十]+、')
-HEADING_RE_H2 = _re.compile(rf'^（[{_CN_NUM}十]+）')
 
 
 def split_heading_with_inline_body(tree):
@@ -221,6 +218,33 @@ def insert_blank_around_title(tree):
         return
 
 
+def _insert_ppr_flag(pPr, tag, ns):
+    """在 w:pPr 中按 schema 顺序设置/创建元素并置 w:val='0'（幂等）"""
+    el = pPr.find(f'{{{ns}}}{tag}')
+    if el is None:
+        el = etree.Element(f'{{{ns}}}{tag}')
+        order = PPR_CHILD_ORDER.index(tag)
+        pos = 0
+        for child in pPr:
+            cname = etree.QName(child).localname
+            if cname in PPR_CHILD_ORDER and PPR_CHILD_ORDER.index(cname) > order:
+                break
+            pos += 1
+        pPr.insert(pos, el)
+    el.set(f'{{{ns}}}val', '0')
+
+
+def disable_keep_together(tree, ns=NS):
+    """关闭所有段落的孤行控制(widowControl)、段中不分页(keepLines)、与下段同页(keepNext)。
+
+    Word 默认的孤行控制/段中不分页/与下段同页会把段落尾部整段挤到下一页，
+    造成页面大量空白；公文压缩篇幅时必须全部关闭，让排版紧凑。
+    """
+    for pPr in tree.iter(f'{{{ns}}}pPr'):
+        for tag in ('keepNext', 'keepLines', 'widowControl'):
+            _insert_ppr_flag(pPr, tag, ns)
+
+
 def fix_quotes_in_tree(tree):
     """修复正文中所有引号方向：按段落顺序交替，奇数个为左引号，偶数个为右引号"""
     for para in tree.iter(f'{{{NS}}}p'):
@@ -266,7 +290,7 @@ def strip_spacing(input_path, output_path=None):
 
     nsmap = {'w': NS}
 
-    # 1. 处理 document.xml — 段落级 spacing + 标题前后空行 + 引号修复 + 字体theme清理 + 分页粘连清理 + 标题内夹带正文拆分
+    # 1. 处理 document.xml — 段落级 spacing + 标题内夹带正文拆分 + 标题前后空行 + 引号修复 + 字体theme清理 + 关闭孤行/段中/同页控制
     doc_path = os.path.join(tmp, 'word/document.xml')
     if os.path.exists(doc_path):
         tree = etree.parse(doc_path)
@@ -275,16 +299,16 @@ def strip_spacing(input_path, output_path=None):
         insert_blank_around_title(tree)
         fix_quotes_in_tree(tree)
         strip_font_theme_attrs(tree)
-        strip_keep_flags_in_tree(tree, xml_path='word/document.xml')
+        disable_keep_together(tree)
         tree.write(doc_path, xml_declaration=True, encoding='UTF-8')
 
-    # 2. 处理 styles.xml — docDefaults + 所有样式 + 字体theme清理 + 分页粘连清理
+    # 2. 处理 styles.xml — docDefaults + 所有样式 + 字体theme清理 + 关闭孤行/段中/同页控制
     styles_path = os.path.join(tmp, 'word/styles.xml')
     if os.path.exists(styles_path):
         tree = etree.parse(styles_path)
         strip_spacing_in_tree(tree, xml_path='word/styles.xml')
         strip_font_theme_attrs(tree)
-        strip_keep_flags_in_tree(tree, xml_path='word/styles.xml')
+        disable_keep_together(tree)
         tree.write(styles_path, xml_declaration=True, encoding='UTF-8')
 
     # 重新打包
@@ -296,7 +320,7 @@ def strip_spacing(input_path, output_path=None):
                 zout.write(full, arcname)
 
     shutil.rmtree(tmp)
-    print(f"[OK] 段间距已清零、标题前后空行已插入、引号与字体已修复、分页粘连(段中不分页/与下段同页)已清除、标题内夹带正文已拆分: {output_path}")
+    print(f"[OK] 段间距已清零、标题前后空行已插入、引号与字体已修复、孤行/段中/同页控制已关闭、标题内夹带正文已拆分: {output_path}")
     return output_path
 
 
