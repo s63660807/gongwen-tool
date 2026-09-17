@@ -229,19 +229,43 @@ def beautify_table(tbl):
                     set_run(r, EA_H1 if is_head else EA_BODY, SZ_TABLE, bold=False)
 
 
+def _ensure_keep_next(p_el):
+    """给段落加 keepNext（与下段同页）
+
+    CT_PPr 规定 keepNext 必须紧跟 pStyle，不能直接 append 到末尾，
+    否则生成的 XML 不符合 schema 顺序。
+    """
+    pPr = p_el.find(qn('w:pPr'))
+    if pPr is None:
+        pPr = OxmlElement('w:pPr')
+        p_el.insert(0, pPr)
+    for e in pPr.findall(qn('w:keepNext')):
+        pPr.remove(e)
+    kn = OxmlElement('w:keepNext')
+    pStyle = pPr.find(qn('w:pStyle'))
+    if pStyle is not None:
+        pStyle.addnext(kn)
+    else:
+        pPr.insert(0, kn)
+
+
 def keep_table_with_prev(doc):
-    """给表格前一段落加 keepNext，让表格整体不与前文拆到两页"""
-    for tbl in doc.element.body.iter(qn('w:tbl')):
-        prev = tbl.getprevious()
-        if prev is None or prev.tag != qn('w:p'):
-            continue
-        pPr = prev.find(qn('w:pPr'))
-        if pPr is None:
-            pPr = OxmlElement('w:pPr')
-            prev.insert(0, pPr)
-        for e in pPr.findall(qn('w:keepNext')):
-            pPr.remove(e)
-        pPr.append(OxmlElement('w:keepNext'))
+    """让整张表格不跨页拆分（两道保险）
+
+    1) 表格前一段落加 keepNext —— 避免表格从页面底部「挤」起，只留表头在页尾
+    2) 除最后一行外，各行的段落都加 keepNext —— 行与行互相粘连，整张表一起换页
+       （行级已设 cantSplit，但那只保证「单行不拆」，整表仍可能被拆到两页）
+    表格本身高于一页时第 2 条无法满足，Word 会自动放弃，不会出错。
+    """
+    for tbl in doc.tables:
+        prev = tbl._element.getprevious()
+        if prev is not None and prev.tag == qn('w:p'):
+            _ensure_keep_next(prev)
+        rows = tbl.rows
+        for row in rows[:-1]:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    _ensure_keep_next(p._element)
 
 
 def space_after_table(doc):
