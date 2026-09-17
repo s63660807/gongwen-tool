@@ -10,13 +10,16 @@
   2. 表格美化 —— 全框线 + 固定列宽 + 居中 + 表头重复 + 垂直居中 + 表内字号字体
   3. 落款对齐 —— 发文机关署名与成文日期右对齐（右空四字）
 
-用法（二选一）：
+用法（三选一）：
 
     # A. 一步到位：md -> 精修后的标准公文 docx
     fix_gongwen_format.py <输入.md> [输出.docx]
 
     # B. 对已有 docx 做精修（不含 Pandoc 转换，仍会清段间距/修引号）
     fix_gongwen_format.py --docx <输入.docx> [输出.docx]
+
+    # C. 落款被挤到单独一页时，加 --fit-signoff 做紧凑处置（见下）
+    fix_gongwen_format.py <输入.md> [输出.docx] --fit-signoff[=1|2]
 
 依赖：同目录下有 reference.docx、convert.py、strip_spacing.py。
 """
@@ -46,6 +49,8 @@ SZ_TABLE = 10.5   # 五号
 
 LINE_BODY = 28    # 正文行距固定值 28 磅
 LINE_TABLE = 16   # 表内行距固定值 16 磅
+LINE_TABLE_TIGHT = 15   # 紧凑模式表内行距（落款单独占页时用）
+LINE_BODY_TIGHT = 27    # 紧凑模式正文行距（GB/T 9704 允许为容纳落款调整行距）
 
 # ── 表格几何 ──────────────────────────────────────────────────
 # A4 版心宽 = 21 - 2.8(左) - 2.6(右) = 15.6cm = 8844 twip
@@ -349,9 +354,64 @@ def right_align_signoff(doc):
             set_run(r, EA_BODY, SZ_BODY, bold=False)
 
 
+# ── 落款同页处置 ────────────────────────────────────────────
+def tighten_for_signoff(doc, level=1):
+    """紧凑处置：把发文机关署名与成文日期拉回正文最后一页。
+
+    GB/T 9704-2012 允许「当公文排版后所剩空白处不能容下印章或成文日期时，
+    可以采取调整行距、字间距的方法解决，务使印章与正文同处一页」。
+    正文排得越满越容易出现「落款单独占一页」——末尾只剩几行空白时尤其明显。
+
+    level 1：取消表格后段前间距 + 收紧表格单元格上下内边距与表内行距（约省 30~40pt）
+    level 2：在 level 1 之上再把正文行距由 28 磅压到 27 磅（每页约省 22pt）
+
+    用法上先试 level 1，转 PDF 看落款是否已回正文页；不够再 level 2。
+    """
+    # 表格：收紧上下内边距 + 表内行距 + 取消表后段前间距
+    for tbl in doc.tables:
+        el = tbl._element
+        tblPr = el.find(qn('w:tblPr'))
+        mar = tblPr.find(qn('w:tblCellMar')) if tblPr is not None else None
+        if mar is not None:
+            for side in ('top', 'bottom'):
+                e = mar.find(qn('w:' + side))
+                if e is not None:
+                    e.set(qn('w:w'), '20')
+        nxt = el.getnext()
+        if nxt is not None and nxt.tag == qn('w:p'):
+            pPr = nxt.find(qn('w:pPr'))
+            sp = pPr.find(qn('w:spacing')) if pPr is not None else None
+            if sp is not None:
+                sp.set(qn('w:before'), '0')
+        for row in tbl.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    pPr = p._element.find(qn('w:pPr'))
+                    sp = pPr.find(qn('w:spacing')) if pPr is not None else None
+                    if sp is not None:
+                        sp.set(qn('w:line'), str(int(LINE_TABLE_TIGHT * 20)))
+                        sp.set(qn('w:lineRule'), 'exact')
+
+    if level < 2:
+        return
+
+    # 正文行距 28 磅 → 27 磅（只动原本就是 28 磅固定值的段落）
+    old = str(int(LINE_BODY * 20))
+    new = str(int(LINE_BODY_TIGHT * 20))
+    for p in doc.paragraphs:
+        pPr = p._element.find(qn('w:pPr'))
+        sp = pPr.find(qn('w:spacing')) if pPr is not None else None
+        if sp is not None and sp.get(qn('w:line')) == old \
+                and sp.get(qn('w:lineRule')) == 'exact':
+            sp.set(qn('w:line'), new)
+
+
 # ── 主流程 ──────────────────────────────────────────────────
-def fix_docx(docx_path):
-    """对已有 docx 做公文化精修（原地保存）"""
+def fix_docx(docx_path, fit_signoff=0):
+    """对已有 docx 做公文化精修（原地保存）
+
+    fit_signoff: 0=不处理；1/2=落款单独占页时的紧凑处置级别（见 tighten_for_signoff）
+    """
     doc = Document(docx_path)
     apply_title_fonts(doc)
     apply_heading_fonts(doc)
@@ -363,11 +423,13 @@ def fix_docx(docx_path):
         keep_table_with_prev(doc)
         space_after_table(doc)
     right_align_signoff(doc)
+    if fit_signoff:
+        tighten_for_signoff(doc, fit_signoff)
     doc.save(docx_path)
     return docx_path
 
 
-def convert(md_path, out_path):
+def convert(md_path, out_path, fit_signoff=0):
     """md -> Pandoc 转换 -> 清段间距/修引号 -> 公文化精修 -> out_path"""
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
@@ -393,7 +455,7 @@ def convert(md_path, out_path):
         sys.exit(1)
 
     strip_spacing_docx(tmp)
-    fix_docx(tmp)
+    fix_docx(tmp, fit_signoff)
 
     if os.path.exists(out_path):
         try:
@@ -413,23 +475,36 @@ def main():
         print(__doc__)
         sys.exit(0)
 
-    if argv[0] == '--docx':
+    # 解析 --fit-signoff[=N]（默认 1）
+    fit = 0
+    for a in list(argv):
+        if a == '--fit-signoff':
+            fit = 1
+            argv.remove(a)
+        elif a.startswith('--fit-signoff='):
+            fit = int(a.split('=', 1)[1])
+            argv.remove(a)
+
+    if argv and argv[0] == '--docx':
         if len(argv) < 2:
-            print('用法: fix_gongwen_format.py --docx <输入.docx> [输出.docx]')
+            print('用法: fix_gongwen_format.py --docx <输入.docx> [输出.docx] [--fit-signoff[=1|2]]')
             sys.exit(1)
         src = argv[1]
         dst = argv[2] if len(argv) > 2 else src
         if src != dst:
             shutil.copy2(src, dst)
-        print('[完成] 已精修:', fix_docx(dst))
+        print('[完成] 已精修:', fix_docx(dst, fit))
         return
 
+    if not argv:
+        print(__doc__)
+        sys.exit(0)
     md_path = argv[0]
     out_path = argv[1] if len(argv) > 1 else os.path.splitext(md_path)[0] + '.docx'
     if not os.path.exists(md_path):
         print('[错误] 文件不存在:', md_path)
         sys.exit(1)
-    convert(md_path, out_path)
+    convert(md_path, out_path, fit)
 
 
 if __name__ == '__main__':
